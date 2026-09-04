@@ -2,6 +2,22 @@ const BASE_STOCKS_DOCS =
   "https://docs.base.org/base-chain/asset-issuance/tokenized-stocks-on-base.md";
 const DEX_SCREENER = "https://api.dexscreener.com/token-pairs/v1/base";
 
+const STOCK_METADATA: Record<string, { name: string; imageUrl: string }> = {
+  AAPLc: { name: "Apple", imageUrl: "/stocks/aaplc.svg" },
+  AMZNc: { name: "Amazon", imageUrl: "/stocks/amznc.svg" },
+  COINc: { name: "Coinbase", imageUrl: "/stocks/coinc.svg" },
+  CRCLc: { name: "Circle", imageUrl: "/stocks/crclc.svg" },
+  GOOGLc: { name: "Alphabet", imageUrl: "/stocks/googlc.svg" },
+  INTCc: { name: "Intel", imageUrl: "/stocks/intcc.svg" },
+  METAc: { name: "Meta", imageUrl: "/stocks/metac.svg" },
+  MSFTc: { name: "Microsoft", imageUrl: "/stocks/msftc.svg" },
+  MSTRc: { name: "MicroStrategy", imageUrl: "/stocks/mstrc.svg" },
+  NVDAc: { name: "NVIDIA", imageUrl: "/stocks/nvdac.svg" },
+  SNDKc: { name: "SanDisk", imageUrl: "/stocks/sndkc.svg" },
+  SPCXc: { name: "SpaceX", imageUrl: "/stocks/spcxc.svg" },
+  TSLAc: { name: "Tesla", imageUrl: "/stocks/tslac.svg" },
+};
+
 type DexPair = {
   pairAddress: string;
   dexId: string;
@@ -15,7 +31,6 @@ type DexPair = {
   liquidity?: { usd?: number };
   marketCap?: number;
   fdv?: number;
-  info?: { imageUrl?: string };
 };
 
 export type StockPool = {
@@ -75,30 +90,26 @@ async function getStock(symbol: string, address: string): Promise<Stock> {
   if (!response.ok) throw new Error(`Market data request failed (${response.status})`);
 
   const pairs = (await response.json()) as DexPair[];
+  // DEX Screener also returns unrelated meme tokens that use a stock as their
+  // quote asset. Those pools do not represent markets for the stock and can
+  // otherwise become the primary pair when they have more liquidity.
   const relevant = pairs.filter(
-    (pair) =>
-      pair.baseToken.address.toLowerCase() === address.toLowerCase() ||
-      pair.quoteToken.address.toLowerCase() === address.toLowerCase(),
+    (pair) => pair.baseToken.address.toLowerCase() === address.toLowerCase(),
   );
   const primary = [...relevant].sort(
     (a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0),
   )[0];
-  const token =
-    primary?.baseToken.address.toLowerCase() === address.toLowerCase()
-      ? primary.baseToken
-      : primary?.quoteToken;
+  const token = primary?.baseToken;
+  const metadata = STOCK_METADATA[symbol];
 
   return {
     address,
     symbol: token?.symbol || symbol,
-    name: token?.name || symbol.replace(/c$/, ""),
-    imageUrl: relevant.find((pair) => pair.info?.imageUrl)?.info?.imageUrl,
+    name: metadata?.name || token?.name || symbol.replace(/c$/, ""),
+    imageUrl: metadata?.imageUrl,
     price: primary ? tokenPrice(primary, address) : 0,
     change24h: primary?.priceChange?.h24 ?? 0,
-    marketCap:
-      primary?.baseToken.address.toLowerCase() === address.toLowerCase()
-        ? (primary.marketCap ?? primary.fdv ?? 0)
-        : 0,
+    marketCap: primary?.marketCap ?? primary?.fdv ?? 0,
     liquidity: relevant.reduce((sum, pair) => sum + (pair.liquidity?.usd ?? 0), 0),
     volume24h: relevant.reduce((sum, pair) => sum + (pair.volume?.h24 ?? 0), 0),
     pools: relevant

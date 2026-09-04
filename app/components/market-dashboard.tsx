@@ -30,7 +30,7 @@ function Change({ value }: { value: number }) {
 
 function StockMark({ stock }: { stock: Stock }) {
   if (stock.imageUrl) {
-    // DEX Screener's image CDN uses changing transform URLs, so a plain image is intentional.
+    // These small local SVG marks do not benefit from image optimization.
     // eslint-disable-next-line @next/next/no-img-element
     return <img className="stock-mark" src={stock.imageUrl} alt="" />;
   }
