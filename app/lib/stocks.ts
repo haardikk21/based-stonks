@@ -1,21 +1,22 @@
+import { unstable_cache } from "next/cache";
+
 const BASE_STOCKS_DOCS =
   "https://docs.base.org/base-chain/asset-issuance/tokenized-stocks-on-base.md";
 const DEX_SCREENER = "https://api.dexscreener.com/token-pairs/v1/base";
+const BASE_RPC = "https://mainnet.base.org";
+const CONTRACT_URI_SELECTOR = "0xe8a3d485";
+const JSON_DATA_URI = "data:application/json;base64,";
 
-const STOCK_METADATA: Record<string, { name: string; imageUrl: string }> = {
-  AAPLc: { name: "Apple", imageUrl: "/stocks/aaplc.svg" },
-  AMZNc: { name: "Amazon", imageUrl: "/stocks/amznc.svg" },
-  COINc: { name: "Coinbase", imageUrl: "/stocks/coinc.svg" },
-  CRCLc: { name: "Circle", imageUrl: "/stocks/crclc.svg" },
-  GOOGLc: { name: "Alphabet", imageUrl: "/stocks/googlc.svg" },
-  INTCc: { name: "Intel", imageUrl: "/stocks/intcc.svg" },
-  METAc: { name: "Meta", imageUrl: "/stocks/metac.svg" },
-  MSFTc: { name: "Microsoft", imageUrl: "/stocks/msftc.svg" },
-  MSTRc: { name: "MicroStrategy", imageUrl: "/stocks/mstrc.svg" },
-  NVDAc: { name: "NVIDIA", imageUrl: "/stocks/nvdac.svg" },
-  SNDKc: { name: "SanDisk", imageUrl: "/stocks/sndkc.svg" },
-  SPCXc: { name: "SpaceX", imageUrl: "/stocks/spcxc.svg" },
-  TSLAc: { name: "Tesla", imageUrl: "/stocks/tslac.svg" },
+type ContractMetadata = {
+  name: string;
+  symbol: string;
+  image: string;
+};
+
+type RpcResponse = {
+  id: number;
+  result?: string;
+  error?: { message?: string };
 };
 
 type DexPair = {
@@ -69,6 +70,87 @@ function parseOfficialContracts(markdown: string) {
   );
 }
 
+function decodeAbiString(value: string) {
+  const encoded = Buffer.from(value.slice(2), "hex");
+  if (encoded.length < 64) throw new Error("Invalid contractURI response");
+
+  const offset = Number(encoded.readBigUInt64BE(24));
+  if (offset + 32 > encoded.length) throw new Error("Invalid contractURI offset");
+
+  const length = Number(encoded.readBigUInt64BE(offset + 24));
+  const start = offset + 32;
+  if (start + length > encoded.length) throw new Error("Invalid contractURI length");
+
+  return encoded.subarray(start, start + length).toString("utf8");
+}
+
+function parseContractMetadata(value: string): ContractMetadata {
+  const uri = decodeAbiString(value);
+  if (!uri.startsWith(JSON_DATA_URI)) throw new Error("Unsupported contractURI format");
+
+  const metadata = JSON.parse(
+    Buffer.from(uri.slice(JSON_DATA_URI.length), "base64").toString("utf8"),
+  ) as Partial<ContractMetadata>;
+
+  if (
+    typeof metadata.name !== "string" ||
+    typeof metadata.symbol !== "string" ||
+    typeof metadata.image !== "string"
+  ) {
+    throw new Error("Invalid contractURI metadata");
+  }
+
+  return metadata as ContractMetadata;
+}
+
+async function readContractMetadata(contracts: { address: string }[]) {
+  const calls = contracts.map(({ address }, id) => ({
+    jsonrpc: "2.0",
+    id,
+    method: "eth_call",
+    params: [{ to: address, data: CONTRACT_URI_SELECTOR }, "latest"],
+  }));
+  const metadata: ContractMetadata[] = [];
+
+  for (const [index, call] of calls.entries()) {
+    let error = "Contract metadata request failed";
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const response = await fetch(BASE_RPC, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(call),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        error = `Contract metadata request failed (${response.status})`;
+      } else {
+        const result = (await response.json()) as RpcResponse;
+        if (result.result) {
+          metadata.push(parseContractMetadata(result.result));
+          break;
+        }
+        error = result.error?.message || error;
+      }
+
+      if (attempt === 2) throw new Error(error);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    if (index < calls.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+
+  return metadata;
+}
+
+const getContractMetadata = unstable_cache(
+  readContractMetadata,
+  ["stock-contract-metadata"],
+  { revalidate: 2592000 },
+);
+
 function tokenPrice(pair: DexPair, address: string) {
   const usd = Number(pair.priceUsd ?? 0);
   if (pair.baseToken.address.toLowerCase() === address.toLowerCase()) return usd;
@@ -82,7 +164,11 @@ function titleCaseDex(dex: string) {
   return dex.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-async function getStock(symbol: string, address: string): Promise<Stock> {
+async function getStock(
+  symbol: string,
+  address: string,
+  metadata: ContractMetadata,
+): Promise<Stock> {
   const response = await fetch(`${DEX_SCREENER}/${address}`, {
     next: { revalidate: 60 },
     headers: { Accept: "application/json" },
@@ -100,13 +186,12 @@ async function getStock(symbol: string, address: string): Promise<Stock> {
     (a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0),
   )[0];
   const token = primary?.baseToken;
-  const metadata = STOCK_METADATA[symbol];
 
   return {
     address,
-    symbol: token?.symbol || symbol,
-    name: metadata?.name || token?.name || symbol.replace(/c$/, ""),
-    imageUrl: metadata?.imageUrl,
+    symbol: metadata.symbol || token?.symbol || symbol,
+    name: metadata.name || token?.name || symbol.replace(/c$/, ""),
+    imageUrl: metadata.image,
     price: primary ? tokenPrice(primary, address) : 0,
     change24h: primary?.priceChange?.h24 ?? 0,
     marketCap: primary?.marketCap ?? primary?.fdv ?? 0,
@@ -132,8 +217,10 @@ export async function getStocksData(): Promise<StocksData> {
   const contracts = parseOfficialContracts(await response.text());
   if (!contracts.length) throw new Error("The official stock list could not be read");
 
+  const metadata = await getContractMetadata(contracts);
+
   const stocks = await Promise.all(
-    contracts.map(({ symbol, address }) => getStock(symbol, address)),
+    contracts.map(({ symbol, address }, index) => getStock(symbol, address, metadata[index])),
   );
 
   return {
