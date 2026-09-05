@@ -6,6 +6,8 @@ const DEX_SCREENER = "https://api.dexscreener.com/token-pairs/v1/base";
 const BASE_RPC = "https://mainnet.base.org";
 const CONTRACT_URI_SELECTOR = "0xe8a3d485";
 const JSON_DATA_URI = "data:application/json;base64,";
+const COINBASE_IMAGE =
+  /^https:\/\/metadata\.coinbase\.com\/equity_icons\/([a-f0-9]{64})\.png$/;
 
 type ContractMetadata = {
   name: string;
@@ -103,6 +105,12 @@ function parseContractMetadata(value: string): ContractMetadata {
   return metadata as ContractMetadata;
 }
 
+function stockImageUrl(imageUrl: string) {
+  const image = imageUrl.match(COINBASE_IMAGE);
+  if (!image) throw new Error("Unsupported contractURI image");
+  return `/api/stock-icon/${image[1]}`;
+}
+
 async function readContractMetadata(contracts: { address: string }[]) {
   const calls = contracts.map(({ address }, id) => ({
     jsonrpc: "2.0",
@@ -191,7 +199,7 @@ async function getStock(
     address,
     symbol: metadata.symbol || token?.symbol || symbol,
     name: metadata.name || token?.name || symbol.replace(/c$/, ""),
-    imageUrl: metadata.image,
+    imageUrl: stockImageUrl(metadata.image),
     price: primary ? tokenPrice(primary, address) : 0,
     change24h: primary?.priceChange?.h24 ?? 0,
     marketCap: primary?.marketCap ?? primary?.fdv ?? 0,
