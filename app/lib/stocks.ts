@@ -4,6 +4,8 @@ const BASE_STOCKS_DOCS =
   "https://docs.base.org/base-chain/asset-issuance/tokenized-stocks-on-base.md";
 const DEX_SCREENER = "https://api.dexscreener.com/token-pairs/v1/base";
 const BASE_RPC = "https://mainnet.base.org";
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+const AGGREGATE_SELECTOR = "252dba42";
 const CONTRACT_URI_SELECTOR = "0xe8a3d485";
 const JSON_DATA_URI = "data:application/json;base64,";
 const COINBASE_IMAGE =
@@ -111,46 +113,67 @@ function stockImageUrl(imageUrl: string) {
   return `/api/stock-icon/${image[1]}`;
 }
 
+function abiWord(value: number | string) {
+  const hex = typeof value === "number" ? value.toString(16) : value.replace(/^0x/, "");
+  return hex.padStart(64, "0");
+}
+
+function encodeMetadataMulticall(contracts: { address: string }[]) {
+  const callData = CONTRACT_URI_SELECTOR.slice(2);
+  const encodedCall = `${abiWord(64)}${abiWord(callData.length / 2)}${callData.padEnd(64, "0")}`;
+  const encodedTupleSize = 32 + encodedCall.length / 2;
+  const offsets = contracts.map((_, index) => abiWord(contracts.length * 32 + index * encodedTupleSize));
+  const calls = contracts.map(({ address }) => `${abiWord(address)}${encodedCall}`);
+
+  return `0x${AGGREGATE_SELECTOR}${abiWord(32)}${abiWord(contracts.length)}${offsets.join("")}${calls.join("")}`;
+}
+
+function decodeMetadataMulticall(value: string) {
+  const encoded = value.slice(2);
+  if (encoded.length < 128) throw new Error("Invalid multicall response");
+
+  const arrayStart = Number.parseInt(encoded.slice(64, 128), 16) * 2;
+  const length = Number.parseInt(encoded.slice(arrayStart, arrayStart + 64), 16);
+  const offsetsStart = arrayStart + 64;
+
+  return Array.from({ length }, (_, index) => {
+    const offsetPosition = offsetsStart + index * 64;
+    const itemStart = offsetsStart + Number.parseInt(encoded.slice(offsetPosition, offsetPosition + 64), 16) * 2;
+    const itemLength = Number.parseInt(encoded.slice(itemStart, itemStart + 64), 16) * 2;
+    return `0x${encoded.slice(itemStart + 64, itemStart + 64 + itemLength)}`;
+  });
+}
+
 async function readContractMetadata(contracts: { address: string }[]) {
-  const calls = contracts.map(({ address }, id) => ({
+  const call = {
     jsonrpc: "2.0",
-    id,
+    id: 1,
     method: "eth_call",
-    params: [{ to: address, data: CONTRACT_URI_SELECTOR }, "latest"],
-  }));
-  const metadata: ContractMetadata[] = [];
+    params: [{ to: MULTICALL3, data: encodeMetadataMulticall(contracts) }, "latest"],
+  };
+  let error = "Contract metadata request failed";
 
-  for (const [index, call] of calls.entries()) {
-    let error = "Contract metadata request failed";
-
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const response = await fetch(BASE_RPC, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(call),
-        cache: "no-store",
-      });
-      if (!response.ok) {
-        error = `Contract metadata request failed (${response.status})`;
-      } else {
-        const result = (await response.json()) as RpcResponse;
-        if (result.result) {
-          metadata.push(parseContractMetadata(result.result));
-          break;
-        }
-        error = result.error?.message || error;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const response = await fetch(BASE_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(call),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      error = `Contract metadata request failed (${response.status})`;
+    } else {
+      const result = (await response.json()) as RpcResponse;
+      if (result.result) {
+        return decodeMetadataMulticall(result.result).map(parseContractMetadata);
       }
-
-      if (attempt === 2) throw new Error(error);
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      error = result.error?.message || error;
     }
 
-    if (index < calls.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 2000));
   }
 
-  return metadata;
+  throw new Error(error);
 }
 
 const getContractMetadata = unstable_cache(
