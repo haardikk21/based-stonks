@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 
 const BASE_STOCKS_DOCS =
-  "https://docs.base.org/base-chain/asset-issuance/tokenized-stocks-on-base.md";
+  "https://docs.base.org/build-on-base/integrate-defi/list-tokenized-stocks.md";
 const DEX_SCREENER = "https://api.dexscreener.com/token-pairs/v1/base";
 const BASE_RPC = "https://mainnet.base.org";
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
@@ -66,12 +66,8 @@ export type StocksData = {
 };
 
 function parseOfficialContracts(markdown: string) {
-  const section = markdown.split("## Contract addresses")[1]?.split("## Additional resources")[0];
-  if (!section) return [];
-
-  return [...section.matchAll(/^\|\s*([A-Z]+c)\s*\|\s*`(0x[a-fA-F0-9]{40})`\s*\|/gm)].map(
-    ([, symbol, address]) => ({ symbol, address }),
-  );
+  const addresses = markdown.match(/0xb200000000[0-9a-f]{30}/gi) ?? [];
+  return [...new Set(addresses)].map((address) => ({ symbol: "", address }));
 }
 
 function decodeAbiString(value: string) {
