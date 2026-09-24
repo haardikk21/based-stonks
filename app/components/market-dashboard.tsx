@@ -30,7 +30,7 @@ function Change({ value }: { value: number }) {
 
 function StockMark({ stock }: { stock: Stock }) {
   if (stock.imageUrl) {
-    // The source URL comes from the token's onchain contractURI metadata.
+    // The source URL comes from the Coinbase tokenized stocks API.
     // eslint-disable-next-line @next/next/no-img-element
     return <img className="stock-mark" src={stock.imageUrl} alt="" />;
   }
